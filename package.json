@@ -1,7 +1,7 @@
 {
   "name": "aviator-api",
   "version": "1.0.0",
-  "description": "CIPHERTECH Aviator API",
+  "description": "CIPHER API",
   "main": "api-aviator.js",
   "scripts": {
     "start": "node api-aviator.js"
