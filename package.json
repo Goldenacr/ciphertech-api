@@ -1,13 +1,13 @@
 {
-  "name": "aviator-api",
+  "name": "ciphertech-api",
   "version": "1.0.0",
-  "description": "CIPHER API",
-  "main": "api-aviator.js",
+  "main": "api-ciphertech.js",
   "scripts": {
-    "start": "node api-aviator.js"
+    "start": "node api-ciphertech.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5"
-  }
+  },
+  "license": "MIT"
 }
