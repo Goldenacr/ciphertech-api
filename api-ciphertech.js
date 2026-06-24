@@ -1,61 +1,140 @@
 const express = require('express');
-const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
+const { MongoClient } = require('mongodb');
 const app = express();
 const PORT = process.env.PORT || 3002;
 
 app.use(cors());
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ limit: '100mb', extended: true }));
+app.use(express.json());
 
-const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const MONGO_URI = 'mongodb+srv://richvybs18:Fuckyou2026%24@cluster0.cq4ddne.mongodb.net/?appName=Cluster0';
+const DB_NAME = 'ciphertech';
+let db;
 
-function load(f) { try { if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) {} return {}; }
-function save(f, d) { fs.writeFileSync(f, JSON.stringify(d, null, 2)); }
+async function connectDB() {
+    try {
+        const client = new MongoClient(MONGO_URI);
+        await client.connect();
+        db = client.db(DB_NAME);
+        console.log('✅ MongoDB Connected - CipherTech API');
+    } catch (e) {
+        console.error('MongoDB connection error:', e.message);
+    }
+}
+connectDB();
 
-// Matches
-app.get('/matches', (req, res) => {
-    res.json({ success: true, matches: load(path.join(DATA_DIR, 'ciphertech_matches.json')) });
-});
-app.post('/matches/sync', (req, res) => {
-    const matches = load(path.join(DATA_DIR, 'ciphertech_matches.json'));
-    Object.assign(matches, req.body.matches || {});
-    save(path.join(DATA_DIR, 'ciphertech_matches.json'), matches);
-    res.json({ success: true });
-});
+function matchesCol() { return db?.collection('matches'); }
+function betsCol() { return db?.collection('bets'); }
+function standingsCol() { return db?.collection('standings'); }
+function revenueCol() { return db?.collection('revenue'); }
 
-// Bets
-app.get('/bets', (req, res) => {
-    res.json({ success: true, bets: load(path.join(DATA_DIR, 'ciphertech_bets.json')) });
-});
-app.post('/bets/sync', (req, res) => {
-    const bets = load(path.join(DATA_DIR, 'ciphertech_bets.json'));
-    Object.assign(bets, req.body.bets || {});
-    save(path.join(DATA_DIR, 'ciphertech_bets.json'), bets);
-    res.json({ success: true });
-});
-
-// Standings
-app.get('/standings', (req, res) => {
-    res.json({ success: true, standings: load(path.join(DATA_DIR, 'ciphertech_standings.json')) });
-});
-
-// Revenue
-app.get('/revenue', (req, res) => {
-    res.json({ success: true, revenue: load(path.join(DATA_DIR, 'ciphertech_revenue.json')) });
-});
-app.post('/revenue/update', (req, res) => {
-    const rev = load(path.join(DATA_DIR, 'ciphertech_revenue.json'));
-    rev.total = (rev.total || 0) + (req.body.amount || 0);
-    rev[req.body.type] = (rev[req.body.type] || 0) + (req.body.amount || 0);
-    save(path.join(DATA_DIR, 'ciphertech_revenue.json'), rev);
-    res.json({ success: true });
+// ======================== MATCHES ========================
+app.get('/matches', async (req, res) => {
+    try {
+        const col = matchesCol();
+        if (!col) return res.json({ success: true, matches: {} });
+        const matches = await col.find({}).toArray();
+        const result = {};
+        matches.forEach(m => { result[m.id] = m; delete result[m.id]._id; });
+        res.json({ success: true, matches: result });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+app.post('/matches/sync', async (req, res) => {
+    try {
+        const { matches, botId } = req.body;
+        if (!matches) return res.status(400).json({ success: false });
+        const col = matchesCol();
+        if (!col) return res.json({ success: true });
+        for (const [id, match] of Object.entries(matches)) {
+            match.botId = botId;
+            match.syncedAt = Date.now();
+            await col.updateOne({ id }, { $set: match }, { upsert: true });
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== BETS ========================
+app.get('/bets', async (req, res) => {
+    try {
+        const col = betsCol();
+        if (!col) return res.json({ success: true, bets: {} });
+        const bets = await col.find({}).toArray();
+        const result = {};
+        bets.forEach(b => { result[b.id] = b; delete result[b.id]._id; });
+        res.json({ success: true, bets: result });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.post('/bets/sync', async (req, res) => {
+    try {
+        const { bets, botId } = req.body;
+        if (!bets) return res.status(400).json({ success: false });
+        const col = betsCol();
+        if (!col) return res.json({ success: true });
+        for (const [id, bet] of Object.entries(bets)) {
+            bet.botId = botId;
+            bet.syncedAt = Date.now();
+            await col.updateOne({ id }, { $set: bet }, { upsert: true });
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== STANDINGS ========================
+app.get('/standings', async (req, res) => {
+    try {
+        const col = standingsCol();
+        if (!col) return res.json({ success: true, standings: {} });
+        const standings = await col.find({}).toArray();
+        const result = {};
+        standings.forEach(s => { result[s.league] = s.data; delete result[s.league]._id; });
+        res.json({ success: true, standings: result });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.post('/standings/sync', async (req, res) => {
+    try {
+        const { league, data } = req.body;
+        if (!league) return res.status(400).json({ success: false });
+        const col = standingsCol();
+        if (col) await col.updateOne({ league }, { $set: { league, data, syncedAt: Date.now() } }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== REVENUE ========================
+app.get('/revenue', async (req, res) => {
+    try {
+        const col = revenueCol();
+        if (!col) return res.json({ success: true, revenue: { total: 0 } });
+        const rev = await col.findOne({ type: 'ciphertech' }) || { total: 0, thisMonth: 0, thisWeek: 0, totalBets: 0 };
+        delete rev._id;
+        res.json({ success: true, revenue: rev });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.post('/revenue/update', async (req, res) => {
+    try {
+        const { amount, type } = req.body;
+        const col = revenueCol();
+        if (!col) return res.json({ success: true });
+        const existing = await col.findOne({ type: 'ciphertech' }) || { total: 0, football: 0, basketball: 0, thisMonth: 0, thisWeek: 0, totalBets: 0 };
+        existing.total = (existing.total || 0) + (amount || 0);
+        existing[type] = (existing[type] || 0) + (amount || 0);
+        existing.thisMonth = (existing.thisMonth || 0) + (amount || 0);
+        existing.thisWeek = (existing.thisWeek || 0) + (amount || 0);
+        existing.totalBets = (existing.totalBets || 0) + 1;
+        await col.updateOne({ type: 'ciphertech' }, { $set: existing }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== HEALTH ========================
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'ciphertech-api', timestamp: Date.now() });
+    res.json({ status: 'ok', service: 'ciphertech-api', db: !!db, timestamp: Date.now() });
 });
 
 app.listen(PORT, () => console.log(`⚽ CipherTech API running on port ${PORT}`));
