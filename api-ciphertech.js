@@ -133,4 +133,16 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'ciphertech-api', db: !!db, timestamp: Date.now() });
 });
 
+// Cleanup old finished matches every hour (keep last 7 days)
+setInterval(async () => {
+    try {
+        const col = matchesCol();
+        if (!col) return;
+        const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+        await col.deleteMany({ status: 'finished', settled: true, kickoff: { $lt: sevenDaysAgo } });
+        console.log('🧹 Cleaned old matches');
+    } catch (e) {}
+}, 3600000);
+
+
 app.listen(PORT, () => console.log(`⚽ CipherTech API running on port ${PORT}`));
