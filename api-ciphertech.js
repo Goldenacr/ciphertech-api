@@ -29,8 +29,11 @@ function matchesCol() { return db?.collection('matches'); }
 function betsCol() { return db?.collection('bets'); }
 function standingsCol() { return db?.collection('standings'); }
 function revenueCol() { return db?.collection('revenue'); }
+function seasonsCol() { return db?.collection('seasons'); }
+function tournamentsCol() { return db?.collection('tournaments'); }
+function trophiesCol() { return db?.collection('trophies'); }
 
-// Matches
+// ======================== MATCHES ========================
 app.get('/matches', async (req, res) => {
     try {
         const col = matchesCol();
@@ -55,7 +58,7 @@ app.post('/matches/sync', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// Bets
+// ======================== BETS ========================
 app.get('/bets', async (req, res) => {
     try {
         const col = betsCol();
@@ -80,7 +83,7 @@ app.post('/bets/sync', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// Standings
+// ======================== STANDINGS ========================
 app.get('/standings', async (req, res) => {
     try {
         const col = standingsCol();
@@ -102,7 +105,7 @@ app.post('/standings/sync', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// Revenue
+// ======================== REVENUE ========================
 app.get('/revenue', async (req, res) => {
     try {
         const col = revenueCol();
@@ -129,11 +132,76 @@ app.post('/revenue/update', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'ciphertech-api', db: !!db, timestamp: Date.now() });
+// ======================== SEASONS ========================
+app.get('/seasons', async (req, res) => {
+    try {
+        const col = seasonsCol();
+        if (!col) return res.json({ success: true, seasons: {} });
+        const seasons = await col.find({}).toArray();
+        const result = {};
+        seasons.forEach(s => { result[s.league] = s; delete result[s.league]._id; });
+        res.json({ success: true, seasons: result });
+    } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// Cleanup old finished matches every hour (keep last 7 days)
+app.post('/seasons/sync', async (req, res) => {
+    try {
+        const { league, data } = req.body;
+        if (!league) return res.status(400).json({ success: false });
+        const col = seasonsCol();
+        if (col) await col.updateOne({ league }, { $set: { ...data, league, syncedAt: Date.now() } }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
+// ======================== TOURNAMENTS ========================
+app.get('/tournaments', async (req, res) => {
+    try {
+        const col = tournamentsCol();
+        if (!col) return res.json({ success: true, tournaments: {} });
+        const tournaments = await col.find({}).toArray();
+        const result = {};
+        tournaments.forEach(t => { result[t.id] = t; delete result[t.id]._id; });
+        res.json({ success: true, tournaments: result });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
+app.post('/tournaments/sync', async (req, res) => {
+    try {
+        const { tournament } = req.body;
+        if (!tournament?.id) return res.status(400).json({ success: false });
+        const col = tournamentsCol();
+        if (col) await col.updateOne({ id: tournament.id }, { $set: { ...tournament, syncedAt: Date.now() } }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
+// ======================== TROPHIES ========================
+app.get('/trophies', async (req, res) => {
+    try {
+        const col = trophiesCol();
+        if (!col) return res.json({ success: true, trophies: {} });
+        const trophies = await col.find({}).toArray();
+        const result = {};
+        trophies.forEach(t => { result[t.team] = t; delete result[t.team]._id; });
+        res.json({ success: true, trophies: result });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
+app.post('/trophies/update', async (req, res) => {
+    try {
+        const { team, cup } = req.body;
+        if (!team || !cup) return res.status(400).json({ success: false });
+        const col = trophiesCol();
+        if (!col) return res.json({ success: true });
+        const existing = await col.findOne({ team }) || { team, cups: {} };
+        existing.cups[cup] = (existing.cups[cup] || 0) + 1;
+        await col.updateOne({ team }, { $set: existing }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
+// ======================== CLEANUP ========================
 setInterval(async () => {
     try {
         const col = matchesCol();
@@ -144,5 +212,9 @@ setInterval(async () => {
     } catch (e) {}
 }, 3600000);
 
+// ======================== HEALTH ========================
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'ciphertech-api', db: !!db, timestamp: Date.now() });
+});
 
 app.listen(PORT, () => console.log(`⚽ CipherTech API running on port ${PORT}`));
