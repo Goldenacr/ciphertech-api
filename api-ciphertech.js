@@ -19,9 +19,7 @@ async function connectDB() {
         await client.connect();
         db = client.db(DB_NAME);
         console.log('✅ MongoDB Connected - CipherTech API');
-    } catch (e) {
-        console.error('MongoDB connection error:', e.message);
-    }
+    } catch (e) { console.error('MongoDB error:', e.message); }
 }
 connectDB();
 
@@ -38,11 +36,53 @@ app.get('/matches', async (req, res) => {
     try {
         const col = matchesCol();
         if (!col) return res.json({ success: true, matches: {} });
-        const matches = await col.find({}).toArray();
+
+        const now = Date.now();
+        const docs = await col.find({}).toArray();
         const result = {};
-        matches.forEach(m => { result[m.id] = m; delete result[m.id]._id; });
-        res.json({ success: true, matches: result });
-    } catch (e) { res.status(500).json({ success: false }); }
+
+        for (const match of docs) {
+            if (!match.id) continue;
+
+            if (match.kickoff) {
+                const kickoff = new Date(match.kickoff).getTime();
+                if (kickoff + 2 * 60 * 60 * 1000 <= now) match.status = 'finished';
+                else if (kickoff <= now) match.status = 'live';
+                else match.status = 'upcoming';
+            }
+
+            if (match.status === 'finished' && match.kickoff &&
+                now - new Date(match.kickoff).getTime() > 24 * 60 * 60 * 1000) {
+                await col.deleteOne({ id: match.id });
+                continue;
+            }
+
+            await col.updateOne(
+                { id: match.id },
+                { $set: { status: match.status, lastUpdated: now } }
+            );
+
+            delete match._id;
+            result[match.id] = match;
+        }
+
+        const sorted = Object.values(result).sort((a,b)=>{
+            const order={live:0,upcoming:1,finished:2};
+            if((order[a.status]??9)!==(order[b.status]??9))
+                return (order[a.status]??9)-(order[b.status]??9);
+            if(a.status==='upcoming') return new Date(a.kickoff||0)-new Date(b.kickoff||0);
+            if(a.status==='finished') return new Date(b.kickoff||0)-new Date(a.kickoff||0);
+            return new Date(a.kickoff||0)-new Date(b.kickoff||0);
+        });
+
+        const finalMatches={};
+        sorted.forEach(m=>finalMatches[m.id]=m);
+
+        res.json({ success:true, matches:finalMatches, timestamp:now });
+    } catch(e){
+        console.error(e);
+        res.status(500).json({ success:false, error:e.message });
+    }
 });
 
 app.post('/matches/sync', async (req, res) => {
@@ -208,7 +248,6 @@ setInterval(async () => {
         if (!col) return;
         const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
         await col.deleteMany({ status: 'finished', settled: true, kickoff: { $lt: sevenDaysAgo } });
-        console.log('🧹 Cleaned old matches');
     } catch (e) {}
 }, 3600000);
 
