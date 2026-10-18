@@ -96,6 +96,123 @@ function startMatchSimulation(matchId) {
     }, 1000);
 }
 
+// ======================== AUTH & USERS (LOGIN) ========================
+app.post('/api/login', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        if (!phone) return res.status(400).json({ success: false, message: 'Phone required' });
+        
+        // Clean the number (remove +, spaces, etc)
+        const cleanPhone = phone.replace(/\D/g, '');
+        
+        // Connect to the AVIATOR Database specifically for users
+        const aviatorDb = db.client.db('aviator'); 
+        const usersCol = aviatorDb.collection('players');
+
+        // Find the user (checking both jid and cleanJid)
+        const user = await usersCol.findOne({ 
+            $or: [
+                { cleanJid: cleanPhone },
+                { jid: { $regex: cleanPhone } }
+            ]
+        });
+
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'Number not registered on CipherTech bot.' });
+        }
+
+        // Determine role (Check against your SUPER_OWNERS array logic)
+        const superOwners = ['233504759307', '233557488116']; 
+        const isOwner = superOwners.includes(cleanPhone) || user.role === 'superowner' || user.role === 'owner';
+
+        res.json({ 
+            success: true, 
+            user: {
+                id: user.id || 'UNKNOWN',
+                name: user.name || 'Player',
+                balance: user.balance || 0,
+                role: isOwner ? 'superowner' : 'player',
+                jid: user.jid || `${cleanPhone}@s.whatsapp.net`
+            }
+        });
+    } catch (e) { 
+        console.error("Login Error:", e);
+        res.status(500).json({ success: false, error: e.message }); 
+    }
+});
+
+// ======================== PLACE BET ========================
+app.post('/api/bets/place', async (req, res) => {
+    try {
+        const { matchId, pick, amount, userJid, isScore } = req.body;
+        
+        // Connect to Aviator DB to get/deduct the user's balance
+        const aviatorDb = db.client.db('aviator');
+        const usersCol = aviatorDb.collection('players');
+        
+        const user = await usersCol.findOne({ jid: userJid });
+        
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+        if (user.balance !== 'unlimited' && user.balance < amount) {
+            return res.status(400).json({ success: false, message: 'Insufficient funds' });
+        }
+
+        // Deduct balance in Aviator DB
+        if (user.balance !== 'unlimited') {
+            await usersCol.updateOne({ jid: userJid }, { $inc: { balance: -amount } });
+        }
+
+        // Generate Bet ID
+        const betId = 'BID' + Date.now().toString(36).toUpperCase().slice(-4);
+        
+        // Calculate Odds
+        let odds = 2.0; 
+        if (pick === 'draw') odds = 3.0;
+        if (pick === 'away') odds = 2.5;
+        if (isScore) odds = 10.0; 
+
+        const potentialWin = Math.floor(amount * odds);
+
+        // Save bet to CipherTech DB
+        const newBet = {
+            id: betId,
+            matchId,
+            user: userJid,
+            userId: user.id,
+            userName: user.name,
+            pick,
+            amount,
+            odds,
+            potentialWin,
+            isScore: isScore || false,
+            status: 'active',
+            placedAt: Date.now()
+        };
+
+        await betsCol().insertOne(newBet);
+        await matchesCol().updateOne({ id: matchId }, { $push: { bets: betId }, $inc: { pool: amount } });
+
+        res.json({ success: true, bet: newBet, newBalance: user.balance === 'unlimited' ? 'unlimited' : user.balance - amount });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== ADMIN ACTIONS ========================
+app.post('/api/admin/fix', async (req, res) => {
+    try {
+        const { matchId, score } = req.body;
+        const [home, away] = score.split('-').map(Number);
+        await matchesCol().updateOne({ id: matchId }, { $set: { fixed: true, result: { home, away } } });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
+app.get('/api/admin/revenue', async (req, res) => {
+    try {
+        const rev = await revenueCol().findOne({ type: 'ciphertech' }) || {};
+        res.json({ success: true, data: rev });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
 // ======================== MATCHES ========================
 app.get('/matches', async (req, res) => {
     try {
