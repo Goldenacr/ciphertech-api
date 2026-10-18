@@ -34,7 +34,7 @@ function betsCol() { return db?.collection('bets'); }
 function standingsCol() { return db?.collection('standings'); }
 function revenueCol() { return db?.collection('revenue'); }
 
-// ======================== MATCH ENGINE (5-Minute Simulation + AI) ========================
+// ======================== MATCH ENGINE (5-Minute Simulation) ========================
 const activeMatches = new Map();
 
 const commentaryLines = {
@@ -73,18 +73,18 @@ function startMatchSimulation(matchId) {
         let event = null;
         let comment = null;
 
-        if (r < 0.05) { // Goal
+        if (r < 0.05) { 
             const isHome = Math.random() > 0.5;
             if (isHome) matchState.score.home++; else matchState.score.away++;
             event = { type: 'GOAL', team: isHome ? 'home' : 'away', minute: matchState.minute, text: 'GOAL!' };
             comment = { minute: matchState.minute, text: getRandomLine('goal') };
-        } else if (r < 0.10) { // Card
+        } else if (r < 0.10) { 
             event = { type: 'CARD', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute, text: 'Yellow Card' };
             comment = { minute: matchState.minute, text: getRandomLine('card') };
-        } else if (r < 0.15) { // Corner
+        } else if (r < 0.15) { 
             event = { type: 'CORNER', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('corner') };
-        } else if (r < 0.20) { // AI Flavor Text
+        } else if (r < 0.20) { 
             comment = { minute: matchState.minute, text: getRandomLine(Math.random() > 0.5 ? 'save' : 'general') };
         }
 
@@ -110,10 +110,26 @@ function startMatchSimulation(matchId) {
             );
             io.emit(`match_update_${matchId}`, matchState);
             activeMatches.delete(matchId);
-            console.log(`🏁 Match ${matchId} finished. Score: ${matchState.score.home}-${matchState.score.away}`);
+            console.log(`🏁 Match ${matchId} finished.`);
         }
     }, 1000);
 }
+
+// Auto-Sweeper: Checks DB every 5 seconds for LIVE matches that need a simulation
+setInterval(async () => {
+    try {
+        const col = matchesCol();
+        if (!col) return;
+        const liveMatches = await col.find({ status: 'live' }).toArray();
+        
+        for (const match of liveMatches) {
+            if (!activeMatches.has(match.id) && !match.result) {
+                console.log(`🤖 Auto-sweeper detected live match: ${match.id}. Starting simulation...`);
+                startMatchSimulation(match.id);
+            }
+        }
+    } catch (e) {}
+}, 5000);
 
 // ======================== AUTH & USERS ========================
 app.post('/api/login', async (req, res) => {
@@ -148,13 +164,23 @@ app.post('/api/bets/place', async (req, res) => {
         if (user.balance !== 'unlimited') await usersCol.updateOne({ jid: userJid }, { $inc: { balance: -amount } });
 
         const betId = 'BID' + Date.now().toString(36).toUpperCase().slice(-4);
-        let odds = pick === 'draw' ? 3.0 : pick === 'away' ? 2.5 : 2.0;
-        if (isScore) odds = 10.0; 
+        
+        // Enhanced Odds calculation
+        let odds = 2.0; 
+        if (pick === 'home') odds = 2.0;
+        else if (pick === 'draw') odds = 3.0;
+        else if (pick === 'away') odds = 2.5;
+        else if (pick === 'btts_yes') odds = 1.8;
+        else if (pick === 'btts_no') odds = 2.0;
+        else if (pick.startsWith('over_')) odds = 1.9;
+        else if (pick.startsWith('under_')) odds = 1.9;
+        else if (isScore) odds = 10.0; 
 
         const newBet = { id: betId, matchId, user: userJid, userId: user.id, userName: user.name, pick, amount, odds, potentialWin: Math.floor(amount * odds), isScore: isScore || false, status: 'active', placedAt: Date.now() };
 
         await betsCol().insertOne(newBet);
         await matchesCol().updateOne({ id: matchId }, { $push: { bets: betId }, $inc: { pool: amount } });
+        
         res.json({ success: true, bet: newBet, newBalance: user.balance === 'unlimited' ? 'unlimited' : user.balance - amount });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -182,16 +208,6 @@ app.post('/api/admin/forcelive', async (req, res) => {
         await matchesCol().updateOne({ id: matchId }, { $set: { status: 'live', kickoff: Date.now() - 1000 } });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false }); }
-});
-
-app.post('/api/admin/refresh', async (req, res) => {
-    // Placeholder for league generation logic (simulate success for UI)
-    setTimeout(() => res.json({ success: true, message: 'League generated' }), 1000);
-});
-
-app.get('/api/admin/export/:type', async (req, res) => {
-    // Placeholder to simulate downloading JSON
-    res.json({ success: true, message: `Exporting ${req.params.type} data...` });
 });
 
 // ======================== MATCHES / BETS / STANDINGS ========================
