@@ -51,7 +51,7 @@ function getRandomLine(type) {
     return lines[Math.floor(Math.random() * lines.length)];
 }
 
-function startMatchSimulation(matchId) {
+function startMatchSimulation(matchId, fixedResult = null) {
     if (activeMatches.has(matchId)) return;
     
     const matchState = {
@@ -60,7 +60,8 @@ function startMatchSimulation(matchId) {
         score: { home: 0, away: 0 },
         events: [],
         commentary: [],
-        isFinished: false
+        isFinished: false,
+        ballPos: { top: '50%', left: '50%' }
     };
     activeMatches.set(matchId, matchState);
 
@@ -69,22 +70,29 @@ function startMatchSimulation(matchId) {
     const interval = setInterval(async () => {
         matchState.minute += 1; 
 
+        // Move the ball randomly every minute
+        matchState.ballPos = {
+            top: `${Math.floor(Math.random() * 80) + 10}%`,
+            left: `${Math.floor(Math.random() * 80) + 10}%`
+        };
+
         const r = Math.random();
         let event = null;
         let comment = null;
 
-        if (r < 0.05) { 
+        if (r < 0.06) { 
             const isHome = Math.random() > 0.5;
             if (isHome) matchState.score.home++; else matchState.score.away++;
             event = { type: 'GOAL', team: isHome ? 'home' : 'away', minute: matchState.minute, text: 'GOAL!' };
             comment = { minute: matchState.minute, text: getRandomLine('goal') };
+            matchState.ballPos = { top: '50%', left: '50%' }; // Reset ball after goal
         } else if (r < 0.10) { 
             event = { type: 'CARD', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute, text: 'Yellow Card' };
             comment = { minute: matchState.minute, text: getRandomLine('card') };
         } else if (r < 0.15) { 
             event = { type: 'CORNER', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('corner') };
-        } else if (r < 0.20) { 
+        } else if (r < 0.25) { 
             comment = { minute: matchState.minute, text: getRandomLine(Math.random() > 0.5 ? 'save' : 'general') };
         }
 
@@ -96,6 +104,11 @@ function startMatchSimulation(matchId) {
         if (matchState.minute >= 90) {
             clearInterval(interval);
             matchState.isFinished = true;
+            
+            // If the match was fixed, enforce the fixed score at the end
+            if (fixedResult) {
+                matchState.score = fixedResult;
+            }
             
             const col = matchesCol();
             await col.updateOne(
@@ -110,7 +123,7 @@ function startMatchSimulation(matchId) {
             );
             io.emit(`match_update_${matchId}`, matchState);
             activeMatches.delete(matchId);
-            console.log(`🏁 Match ${matchId} finished.`);
+            console.log(`🏁 Match ${matchId} finished. Final Score: ${matchState.score.home}-${matchState.score.away}`);
         }
     }, 1000);
 }
@@ -123,9 +136,8 @@ setInterval(async () => {
         const liveMatches = await col.find({ status: 'live' }).toArray();
         
         for (const match of liveMatches) {
-            if (!activeMatches.has(match.id) && !match.result) {
-                console.log(`🤖 Auto-sweeper detected live match: ${match.id}. Starting simulation...`);
-                startMatchSimulation(match.id);
+            if (!activeMatches.has(match.id)) {
+                startMatchSimulation(match.id, match.fixed ? match.result : null);
             }
         }
     } catch (e) {}
@@ -165,7 +177,6 @@ app.post('/api/bets/place', async (req, res) => {
 
         const betId = 'BID' + Date.now().toString(36).toUpperCase().slice(-4);
         
-        // Enhanced Odds calculation
         let odds = 2.0; 
         if (pick === 'home') odds = 2.0;
         else if (pick === 'draw') odds = 3.0;
@@ -227,7 +238,11 @@ app.post('/matches/sync', async (req, res) => {
         for (const [id, match] of Object.entries(matches)) {
             match.botId = botId; match.syncedAt = Date.now();
             await col.updateOne({ id }, { $set: match }, { upsert: true });
-            if (match.status === 'live' && !activeMatches.has(id) && !match.result) startMatchSimulation(id);
+            
+            // If the bot syncs a live match, and we aren't simulating it yet, start!
+            if (match.status === 'live' && !activeMatches.has(id)) {
+                startMatchSimulation(id, match.fixed ? match.result : null);
+            }
         }
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false }); }
