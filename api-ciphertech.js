@@ -61,7 +61,7 @@ function startMatchSimulation(matchId, fixedResult = null) {
         events: [],
         commentary: [],
         isFinished: false,
-        ballPos: { top: '50%', left: '50%' }
+        ballPos: { top: '50%', left: '50%' } // Center
     };
     activeMatches.set(matchId, matchState);
 
@@ -74,24 +74,31 @@ function startMatchSimulation(matchId, fixedResult = null) {
         let event = null;
         let comment = null;
 
+        // Default movement (midfield)
         let newBallPos = { top: `${Math.floor(Math.random() * 40) + 30}%`, left: `${Math.floor(Math.random() * 40) + 30}%` };
 
         if (r < 0.06) { 
+            // GOAL: Ball goes directly into the net (Top or Bottom Center)
             const isHome = Math.random() > 0.5;
             if (isHome) matchState.score.home++; else matchState.score.away++;
             event = { type: 'GOAL', team: isHome ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('goal') };
-            newBallPos = isHome ? { top: '5%', left: '50%' } : { top: '95%', left: '50%' }; 
+            newBallPos = isHome ? { top: '2%', left: '50%' } : { top: '98%', left: '50%' }; 
+            
         } else if (r < 0.10) { 
+            // CARD
             event = { type: 'CARD', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('card') };
+            
         } else if (r < 0.20) { 
+            // CORNER: Ball goes to the corner flag (Top/Bottom Left/Right)
             const isHome = Math.random() > 0.5;
             event = { type: 'CORNER', team: isHome ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('corner') };
             newBallPos = isHome 
-                ? { top: '5%', left: Math.random() > 0.5 ? '5%' : '95%' } 
-                : { top: '95%', left: Math.random() > 0.5 ? '5%' : '95%' };
+                ? { top: '2%', left: Math.random() > 0.5 ? '2%' : '98%' } 
+                : { top: '98%', left: Math.random() > 0.5 ? '2%' : '98%' };
+                
         } else if (r < 0.30) { 
             comment = { minute: matchState.minute, text: getRandomLine(Math.random() > 0.5 ? 'save' : 'general') };
         }
@@ -149,7 +156,7 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/bets/place', async (req, res) => {
     try {
-        const { matchId, pick, amount, userJid, isScore } = req.body;
+        const { matchId, pick, amount, userJid } = req.body;
         const aviatorDb = db.client.db('aviator');
         const user = await aviatorDb.collection('players').findOne({ jid: userJid });
         
@@ -159,16 +166,13 @@ app.post('/api/bets/place', async (req, res) => {
         if (user.balance !== 'unlimited') await aviatorDb.collection('players').updateOne({ jid: userJid }, { $inc: { balance: -amount } });
 
         const betId = 'BID' + Date.now().toString(36).toUpperCase().slice(-4);
-        let odds = 2.0; 
-        if (pick === 'draw') odds = 3.0;
-        if (pick === 'away') odds = 2.5;
+        let odds = pick === 'draw' ? 3.0 : pick === 'away' ? 2.5 : 2.0;
         if (pick === 'btts_yes') odds = 1.8;
         if (pick === 'btts_no') odds = 2.0;
         if (pick.startsWith('over_')) odds = 1.9;
         if (pick.startsWith('under_')) odds = 1.9;
-        if (isScore) odds = 10.0; 
 
-        const newBet = { id: betId, matchId, user: userJid, userId: user.id, userName: user.name, pick, amount, odds, potentialWin: Math.floor(amount * odds), isScore: isScore || false, status: 'active', placedAt: Date.now() };
+        const newBet = { id: betId, matchId, user: userJid, userId: user.id, userName: user.name, pick, amount, odds, potentialWin: Math.floor(amount * odds), status: 'active', placedAt: Date.now() };
 
         await betsCol().insertOne(newBet);
         await matchesCol().updateOne({ id: matchId }, { $push: { bets: betId }, $inc: { pool: amount } });
@@ -191,7 +195,6 @@ app.post('/api/bets/place-multiple', async (req, res) => {
         let totalOdds = 1;
         const matchIds = [];
         
-        // Calculate total odds based on the exact picks made in the frontend
         selections.forEach(sel => {
             totalOdds *= sel.odds; 
             matchIds.push(sel.matchId);
@@ -204,7 +207,7 @@ app.post('/api/bets/place-multiple', async (req, res) => {
         const newBet = {
             id: betId,
             type: 'accumulator',
-            selections: selections, // Stores the exact array of {matchId, pick, odds, home, away}
+            selections: selections,
             user: userJid,
             userId: user.id,
             userName: user.name,
