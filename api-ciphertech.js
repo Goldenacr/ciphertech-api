@@ -74,27 +74,21 @@ function startMatchSimulation(matchId, fixedResult = null) {
         let event = null;
         let comment = null;
 
-        // Default movement (midfield)
         let newBallPos = { top: `${Math.floor(Math.random() * 40) + 30}%`, left: `${Math.floor(Math.random() * 40) + 30}%` };
 
         if (r < 0.06) { 
-            // GOAL
             const isHome = Math.random() > 0.5;
             if (isHome) matchState.score.home++; else matchState.score.away++;
             event = { type: 'GOAL', team: isHome ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('goal') };
-            // Ball goes into the net
             newBallPos = isHome ? { top: '5%', left: '50%' } : { top: '95%', left: '50%' }; 
         } else if (r < 0.10) { 
-            // CARD
             event = { type: 'CARD', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('card') };
         } else if (r < 0.20) { 
-            // CORNER
             const isHome = Math.random() > 0.5;
             event = { type: 'CORNER', team: isHome ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('corner') };
-            // Ball goes to the corner flag
             newBallPos = isHome 
                 ? { top: '5%', left: Math.random() > 0.5 ? '5%' : '95%' } 
                 : { top: '95%', left: Math.random() > 0.5 ? '5%' : '95%' };
@@ -122,12 +116,11 @@ function startMatchSimulation(matchId, fixedResult = null) {
             );
             io.emit(`match_update_${matchId}`, matchState);
             activeMatches.delete(matchId);
-            console.log(`🏁 Match ${matchId} finished. Score: ${matchState.score.home}-${matchState.score.away}`);
+            console.log(`🏁 Match ${matchId} finished.`);
         }
     }, 1000);
 }
 
-// Auto-Sweeper
 setInterval(async () => {
     try {
         const col = matchesCol();
@@ -166,7 +159,13 @@ app.post('/api/bets/place', async (req, res) => {
         if (user.balance !== 'unlimited') await aviatorDb.collection('players').updateOne({ jid: userJid }, { $inc: { balance: -amount } });
 
         const betId = 'BID' + Date.now().toString(36).toUpperCase().slice(-4);
-        let odds = pick === 'draw' ? 3.0 : pick === 'away' ? 2.5 : 2.0;
+        let odds = 2.0; 
+        if (pick === 'draw') odds = 3.0;
+        if (pick === 'away') odds = 2.5;
+        if (pick === 'btts_yes') odds = 1.8;
+        if (pick === 'btts_no') odds = 2.0;
+        if (pick.startsWith('over_')) odds = 1.9;
+        if (pick.startsWith('under_')) odds = 1.9;
         if (isScore) odds = 10.0; 
 
         const newBet = { id: betId, matchId, user: userJid, userId: user.id, userName: user.name, pick, amount, odds, potentialWin: Math.floor(amount * odds), isScore: isScore || false, status: 'active', placedAt: Date.now() };
@@ -192,14 +191,9 @@ app.post('/api/bets/place-multiple', async (req, res) => {
         let totalOdds = 1;
         const matchIds = [];
         
+        // Calculate total odds based on the exact picks made in the frontend
         selections.forEach(sel => {
-            let odds = 2.0;
-            if (sel.pick === 'draw') odds = 3.0;
-            if (sel.pick === 'away') odds = 2.5;
-            if (sel.pick === 'btts_yes') odds = 1.8;
-            if (sel.pick === 'btts_no') odds = 2.0;
-            if (sel.pick.startsWith('over_')) odds = 1.9;
-            totalOdds *= odds;
+            totalOdds *= sel.odds; 
             matchIds.push(sel.matchId);
         });
 
@@ -210,7 +204,7 @@ app.post('/api/bets/place-multiple', async (req, res) => {
         const newBet = {
             id: betId,
             type: 'accumulator',
-            selections: selections,
+            selections: selections, // Stores the exact array of {matchId, pick, odds, home, away}
             user: userJid,
             userId: user.id,
             userName: user.name,
