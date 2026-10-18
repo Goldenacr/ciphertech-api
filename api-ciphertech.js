@@ -34,12 +34,12 @@ function betsCol() { return db?.collection('bets'); }
 function standingsCol() { return db?.collection('standings'); }
 function revenueCol() { return db?.collection('revenue'); }
 
-// ======================== MATCH ENGINE (5-Minute Simulation) ========================
+// ======================== MATCH ENGINE ========================
 const activeMatches = new Map();
 
 const commentaryLines = {
     goal: ["GOOOOAL! What a strike!", "The net bulges! Incredible finish!", "Clinical! The keeper had no chance."],
-    card: ["That's a booking. Late challenge.", "The referee reaches for the yellow card.", "He'll need to be careful now."],
+    card: ["That's a booking. Late challenge.", "The referee reaches for the yellow card."],
     corner: ["Corner kick incoming.", "The ball is whipped in... cleared!", "Dangerous set-piece here."],
     save: ["What a save! Fantastic reflexes.", "Denied! The keeper stands tall."],
     miss: ["Over the bar! He should have scored.", "Wide! A golden opportunity wasted."],
@@ -65,36 +65,44 @@ function startMatchSimulation(matchId, fixedResult = null) {
     };
     activeMatches.set(matchId, matchState);
 
-    console.log(`⚽ Starting live simulation for ${matchId}`);
+    console.log(`⚽ Starting simulation for ${matchId}`);
 
     const interval = setInterval(async () => {
         matchState.minute += 1; 
-
-        // Move the ball randomly every minute
-        matchState.ballPos = {
-            top: `${Math.floor(Math.random() * 80) + 10}%`,
-            left: `${Math.floor(Math.random() * 80) + 10}%`
-        };
 
         const r = Math.random();
         let event = null;
         let comment = null;
 
+        // Default movement (midfield)
+        let newBallPos = { top: `${Math.floor(Math.random() * 40) + 30}%`, left: `${Math.floor(Math.random() * 40) + 30}%` };
+
         if (r < 0.06) { 
+            // GOAL
             const isHome = Math.random() > 0.5;
             if (isHome) matchState.score.home++; else matchState.score.away++;
-            event = { type: 'GOAL', team: isHome ? 'home' : 'away', minute: matchState.minute, text: 'GOAL!' };
+            event = { type: 'GOAL', team: isHome ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('goal') };
-            matchState.ballPos = { top: '50%', left: '50%' }; // Reset ball after goal
+            // Ball goes into the net
+            newBallPos = isHome ? { top: '5%', left: '50%' } : { top: '95%', left: '50%' }; 
         } else if (r < 0.10) { 
-            event = { type: 'CARD', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute, text: 'Yellow Card' };
+            // CARD
+            event = { type: 'CARD', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('card') };
-        } else if (r < 0.15) { 
-            event = { type: 'CORNER', team: Math.random() > 0.5 ? 'home' : 'away', minute: matchState.minute };
+        } else if (r < 0.20) { 
+            // CORNER
+            const isHome = Math.random() > 0.5;
+            event = { type: 'CORNER', team: isHome ? 'home' : 'away', minute: matchState.minute };
             comment = { minute: matchState.minute, text: getRandomLine('corner') };
-        } else if (r < 0.25) { 
+            // Ball goes to the corner flag
+            newBallPos = isHome 
+                ? { top: '5%', left: Math.random() > 0.5 ? '5%' : '95%' } 
+                : { top: '95%', left: Math.random() > 0.5 ? '5%' : '95%' };
+        } else if (r < 0.30) { 
             comment = { minute: matchState.minute, text: getRandomLine(Math.random() > 0.5 ? 'save' : 'general') };
         }
+
+        matchState.ballPos = newBallPos;
 
         if (event) matchState.events.push(event);
         if (comment) matchState.commentary.push(comment);
@@ -105,98 +113,124 @@ function startMatchSimulation(matchId, fixedResult = null) {
             clearInterval(interval);
             matchState.isFinished = true;
             
-            // If the match was fixed, enforce the fixed score at the end
-            if (fixedResult) {
-                matchState.score = fixedResult;
-            }
+            if (fixedResult) matchState.score = fixedResult;
             
             const col = matchesCol();
             await col.updateOne(
                 { id: matchId },
-                { $set: { 
-                    status: 'finished', 
-                    result: matchState.score, 
-                    events: matchState.events,
-                    commentary: matchState.commentary,
-                    settled: false 
-                }}
+                { $set: { status: 'finished', result: matchState.score, events: matchState.events, commentary: matchState.commentary, settled: false }}
             );
             io.emit(`match_update_${matchId}`, matchState);
             activeMatches.delete(matchId);
-            console.log(`🏁 Match ${matchId} finished. Final Score: ${matchState.score.home}-${matchState.score.away}`);
+            console.log(`🏁 Match ${matchId} finished. Score: ${matchState.score.home}-${matchState.score.away}`);
         }
     }, 1000);
 }
 
-// Auto-Sweeper: Checks DB every 5 seconds for LIVE matches that need a simulation
+// Auto-Sweeper
 setInterval(async () => {
     try {
         const col = matchesCol();
         if (!col) return;
         const liveMatches = await col.find({ status: 'live' }).toArray();
-        
         for (const match of liveMatches) {
-            if (!activeMatches.has(match.id)) {
-                startMatchSimulation(match.id, match.fixed ? match.result : null);
-            }
+            if (!activeMatches.has(match.id)) startMatchSimulation(match.id, match.fixed ? match.result : null);
         }
     } catch (e) {}
 }, 5000);
 
-// ======================== AUTH & USERS ========================
+// ======================== AUTH & BETS ========================
 app.post('/api/login', async (req, res) => {
     try {
         const { phone } = req.body;
         if (!phone) return res.status(400).json({ success: false, message: 'Phone required' });
         const cleanPhone = phone.replace(/\D/g, '');
         const aviatorDb = db.client.db('aviator'); 
-        const usersCol = aviatorDb.collection('players');
+        const user = await aviatorDb.collection('players').findOne({ $or: [{ cleanJid: cleanPhone }, { jid: { $regex: cleanPhone } }] });
+        if (!user) return res.status(404).json({ success: false, message: 'Number not registered.' });
 
-        const user = await usersCol.findOne({ $or: [{ cleanJid: cleanPhone }, { jid: { $regex: cleanPhone } }] });
-        if (!user) return res.status(404).json({ success: false, message: 'Number not registered on CipherTech bot.' });
-
-        const superOwners = ['233504759307', '233557488116']; 
-        const isOwner = superOwners.includes(cleanPhone) || user.role === 'superowner' || user.role === 'owner';
-
+        const isOwner = ['233504759307', '233557488116'].includes(cleanPhone) || user.role === 'superowner';
         res.json({ success: true, user: { id: user.id, name: user.name, balance: user.balance, role: isOwner ? 'superowner' : 'player', jid: user.jid } });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ======================== PLACE BET ========================
 app.post('/api/bets/place', async (req, res) => {
     try {
         const { matchId, pick, amount, userJid, isScore } = req.body;
         const aviatorDb = db.client.db('aviator');
-        const usersCol = aviatorDb.collection('players');
+        const user = await aviatorDb.collection('players').findOne({ jid: userJid });
         
-        const user = await usersCol.findOne({ jid: userJid });
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
         if (user.balance !== 'unlimited' && user.balance < amount) return res.status(400).json({ success: false, message: 'Insufficient funds' });
 
-        if (user.balance !== 'unlimited') await usersCol.updateOne({ jid: userJid }, { $inc: { balance: -amount } });
+        if (user.balance !== 'unlimited') await aviatorDb.collection('players').updateOne({ jid: userJid }, { $inc: { balance: -amount } });
 
         const betId = 'BID' + Date.now().toString(36).toUpperCase().slice(-4);
-        
-        let odds = 2.0; 
-        if (pick === 'home') odds = 2.0;
-        else if (pick === 'draw') odds = 3.0;
-        else if (pick === 'away') odds = 2.5;
-        else if (pick === 'btts_yes') odds = 1.8;
-        else if (pick === 'btts_no') odds = 2.0;
-        else if (pick.startsWith('over_')) odds = 1.9;
-        else if (pick.startsWith('under_')) odds = 1.9;
-        else if (isScore) odds = 10.0; 
+        let odds = pick === 'draw' ? 3.0 : pick === 'away' ? 2.5 : 2.0;
+        if (isScore) odds = 10.0; 
 
         const newBet = { id: betId, matchId, user: userJid, userId: user.id, userName: user.name, pick, amount, odds, potentialWin: Math.floor(amount * odds), isScore: isScore || false, status: 'active', placedAt: Date.now() };
 
         await betsCol().insertOne(newBet);
         await matchesCol().updateOne({ id: matchId }, { $push: { bets: betId }, $inc: { pool: amount } });
-        
         res.json({ success: true, bet: newBet, newBalance: user.balance === 'unlimited' ? 'unlimited' : user.balance - amount });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ======================== ADMIN ACTIONS ========================
+app.post('/api/bets/place-multiple', async (req, res) => {
+    try {
+        const { selections, amount, userJid } = req.body;
+        if (!selections || selections.length < 2) return res.status(400).json({ success: false, message: 'Need at least 2 selections.' });
+
+        const aviatorDb = db.client.db('aviator');
+        const user = await aviatorDb.collection('players').findOne({ jid: userJid });
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+        if (user.balance !== 'unlimited' && user.balance < amount) return res.status(400).json({ success: false, message: 'Insufficient funds' });
+
+        if (user.balance !== 'unlimited') await aviatorDb.collection('players').updateOne({ jid: userJid }, { $inc: { balance: -amount } });
+
+        let totalOdds = 1;
+        const matchIds = [];
+        
+        selections.forEach(sel => {
+            let odds = 2.0;
+            if (sel.pick === 'draw') odds = 3.0;
+            if (sel.pick === 'away') odds = 2.5;
+            if (sel.pick === 'btts_yes') odds = 1.8;
+            if (sel.pick === 'btts_no') odds = 2.0;
+            if (sel.pick.startsWith('over_')) odds = 1.9;
+            totalOdds *= odds;
+            matchIds.push(sel.matchId);
+        });
+
+        totalOdds = Math.round(totalOdds * 100) / 100;
+        const potentialWin = Math.floor(amount * totalOdds);
+        const betId = 'ACC' + Date.now().toString(36).toUpperCase().slice(-4);
+
+        const newBet = {
+            id: betId,
+            type: 'accumulator',
+            selections: selections,
+            user: userJid,
+            userId: user.id,
+            userName: user.name,
+            amount,
+            odds: totalOdds,
+            potentialWin,
+            status: 'active',
+            placedAt: Date.now()
+        };
+
+        await betsCol().insertOne(newBet);
+        for (const matchId of matchIds) {
+            await matchesCol().updateOne({ id: matchId }, { $push: { bets: betId }, $inc: { pool: amount / selections.length } });
+        }
+
+        res.json({ success: true, bet: newBet, newBalance: user.balance === 'unlimited' ? 'unlimited' : user.balance - amount });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== ADMIN & SYNC ========================
 app.post('/api/admin/fix', async (req, res) => {
     try {
         const { matchId, score } = req.body;
@@ -207,10 +241,7 @@ app.post('/api/admin/fix', async (req, res) => {
 });
 
 app.get('/api/admin/revenue', async (req, res) => {
-    try {
-        const rev = await revenueCol().findOne({ type: 'ciphertech' }) || {};
-        res.json({ success: true, data: rev });
-    } catch (e) { res.status(500).json({ success: false }); }
+    try { res.json({ success: true, data: await revenueCol().findOne({ type: 'ciphertech' }) || {} }); } catch (e) { res.status(500).json({ success: false }); }
 });
 
 app.post('/api/admin/forcelive', async (req, res) => {
@@ -221,30 +252,12 @@ app.post('/api/admin/forcelive', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// ======================== MATCHES / BETS / STANDINGS ========================
 app.get('/matches', async (req, res) => {
     try {
         const matches = await matchesCol().find({}).toArray();
         const result = {};
         matches.forEach(m => { result[m.id] = m; delete result[m.id]._id; });
         res.json({ success: true, matches: result });
-    } catch (e) { res.status(500).json({ success: false }); }
-});
-
-app.post('/matches/sync', async (req, res) => {
-    try {
-        const { matches, botId } = req.body;
-        const col = matchesCol();
-        for (const [id, match] of Object.entries(matches)) {
-            match.botId = botId; match.syncedAt = Date.now();
-            await col.updateOne({ id }, { $set: match }, { upsert: true });
-            
-            // If the bot syncs a live match, and we aren't simulating it yet, start!
-            if (match.status === 'live' && !activeMatches.has(id)) {
-                startMatchSimulation(id, match.fixed ? match.result : null);
-            }
-        }
-        res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
@@ -257,6 +270,26 @@ app.get('/bets', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
+app.post('/matches/sync', async (req, res) => {
+    try {
+        const { matches, standings, botId } = req.body;
+        const col = matchesCol();
+        for (const [id, match] of Object.entries(matches || {})) {
+            match.botId = botId; match.syncedAt = Date.now();
+            await col.updateOne({ id }, { $set: match }, { upsert: true });
+            if (match.status === 'live' && !activeMatches.has(id)) startMatchSimulation(id, match.fixed ? match.result : null);
+        }
+        
+        if (standings && Object.keys(standings).length > 0) {
+            const sCol = standingsCol();
+            for (const [league, data] of Object.entries(standings)) {
+                await sCol.updateOne({ league }, { $set: { league, data, syncedAt: Date.now() } }, { upsert: true });
+            }
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 app.get('/standings', async (req, res) => {
     try {
         const standings = await standingsCol().find({}).toArray();
@@ -267,5 +300,4 @@ app.get('/standings', async (req, res) => {
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', db: !!db }));
-
 server.listen(PORT, () => console.log(`⚽ CipherTech API running on port ${PORT}`));
