@@ -55,11 +55,9 @@ function startMatchSimulation(matchId, fixedResult = null) {
         isFinished: false, ballPos: { top: '50%', left: '50%' }
     };
     activeMatches.set(matchId, matchState);
-    console.log(`⚽ Starting simulation for ${matchId}`);
 
     const interval = setInterval(async () => {
         matchState.minute += 1; 
-
         const r = Math.random();
         let event = null; let comment = null;
         let newBallPos = { top: `${Math.floor(Math.random() * 40) + 30}%`, left: `${Math.floor(Math.random() * 40) + 30}%` };
@@ -96,7 +94,6 @@ function startMatchSimulation(matchId, fixedResult = null) {
             await col.updateOne({ id: matchId }, { $set: { status: 'finished', result: matchState.score, events: matchState.events, commentary: matchState.commentary, settled: false }});
             io.emit(`match_update_${matchId}`, matchState);
             activeMatches.delete(matchId);
-            console.log(`🏁 Match ${matchId} finished.`);
         }
     }, 1000);
 }
@@ -112,7 +109,7 @@ setInterval(async () => {
     } catch (e) {}
 }, 5000);
 
-// ======================== AUTH & USERS ========================
+// ======================== AUTH ========================
 app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
@@ -123,18 +120,92 @@ app.post('/api/login', async (req, res) => {
         const user = await aviatorDb.collection('players').findOne({ $or: [{ cleanJid: cleanPhone }, { jid: { $regex: cleanPhone } }] });
         
         if (!user) return res.status(404).json({ success: false, message: 'Number not registered.' });
-
-        // Password Logic: If user has a webPassword set, require it.
-        if (user.webPassword && user.webPassword !== password) {
-            return res.status(401).json({ success: false, message: 'Incorrect password.' });
-        }
+        if (user.webPassword && user.webPassword !== password) return res.status(401).json({ success: false, message: 'Incorrect password.' });
 
         const isOwner = ['233504759307', '233557488116'].includes(cleanPhone) || user.role === 'superowner';
         res.json({ success: true, user: { id: user.id, name: user.name, balance: user.balance, role: isOwner ? 'superowner' : 'player', jid: user.jid, hasPassword: !!user.webPassword } });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ======================== BETS ========================
+// ======================== ADMIN ACTIONS ========================
+app.post('/api/admin/balance', async (req, res) => {
+    const { targetJid, amount } = req.body;
+    const aviatorDb = db.client.db('aviator');
+    await aviatorDb.collection('players').updateOne({ jid: targetJid }, { $inc: { balance: amount } });
+    res.json({ success: true });
+});
+
+app.post('/api/admin/setpassword', async (req, res) => {
+    const { targetJid, newPassword } = req.body;
+    const aviatorDb = db.client.db('aviator');
+    await aviatorDb.collection('players').updateOne({ jid: targetJid }, { $set: { webPassword: newPassword } });
+    res.json({ success: true });
+});
+
+app.post('/api/admin/forcelive', async (req, res) => {
+    const { matchId } = req.body;
+    await matchesCol().updateOne({ id: matchId }, { $set: { status: 'live', kickoff: Date.now() - 1000 } });
+    res.json({ success: true });
+});
+
+// THE MASTER FIX ENGINE
+app.post('/api/admin/fix', async (req, res) => {
+    try {
+        const { matchId, market } = req.body;
+        let h = 0, a = 0;
+
+        // Calculate a score that forces the requested market to WIN
+        if (market === 'home' || market === '1') h = 2, a = 0;
+        else if (market === 'draw' || market === 'X') h = 1, a = 1;
+        else if (market === 'away' || market === '2') h = 0, a = 2;
+        else if (market === 'btts_yes') h = 2, a = 1;
+        else if (market === 'btts_no') h = 2, a = 0;
+        else if (market === 'over_0.5') h = 1, a = 0;
+        else if (market === 'over_1.5') h = 1, a = 1;
+        else if (market === 'over_2.5') h = 2, a = 1;
+        else if (market === 'over_3.5') h = 2, a = 2;
+        else if (market === 'over_4.5') h = 3, a = 2;
+        else if (market === 'over_5.5') h = 3, a = 3;
+        else if (market === 'over_6.5') h = 4, a = 3;
+        else if (market === 'under_0.5') h = 0, a = 0;
+        else if (market === 'under_1.5') h = 1, a = 0;
+        else if (market === 'under_2.5') h = 1, a = 1;
+        else if (market === 'under_3.5') h = 2, a = 1;
+        else if (market === 'under_4.5') h = 2, a = 2;
+        else if (market === 'under_5.5') h = 3, a = 2;
+        else if (market === 'under_6.5') h = 3, a = 3;
+        else if (market === 'ht_home') h = 2, a = 0;
+        else if (market === 'ht_draw') h = 1, a = 1;
+        else if (market === 'ht_away') h = 0, a = 2;
+        else if (market === 'first10_home') h = 1, a = 0;
+        else if (market === 'first10_draw') h = 0, a = 0;
+        else if (market === 'first10_away') h = 0, a = 1;
+        else if (market.startsWith('handicap_home_')) {
+            const val = parseInt(market.split('_')[2]);
+            h = val < 0 ? Math.abs(val) + 1 : 2; 
+            a = 0;
+        }
+        else if (market.startsWith('handicap_away_')) {
+            const val = parseInt(market.split('_')[2]);
+            h = 0;
+            a = val < 0 ? Math.abs(val) + 1 : 2;
+        }
+        else if (market.startsWith('score_')) {
+            const parts = market.replace('score_', '').split('-');
+            h = parseInt(parts[0]); a = parseInt(parts[1]);
+        }
+        else {
+            return res.status(400).json({ success: false, message: 'Invalid market type' });
+        }
+
+        // Save fixed result
+        await matchesCol().updateOne({ id: matchId }, { $set: { fixed: true, result: { home: h, away: a } } });
+        
+        res.json({ success: true, score: `${h}-${a}` });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== BETS & DATA ========================
 app.post('/api/bets/place-multiple', async (req, res) => {
     try {
         const { selections, amount, userJid, type } = req.body;
@@ -151,15 +222,14 @@ app.post('/api/bets/place-multiple', async (req, res) => {
 
         if (type === 'multiple') {
             let totalOdds = 1;
-            const matchIds = [];
-            selections.forEach(sel => { totalOdds *= sel.odds; matchIds.push(sel.matchId); });
+            selections.forEach(sel => { totalOdds *= sel.odds; });
             totalOdds = Math.round(totalOdds * 100) / 100;
             const potentialWin = Math.floor(amount * totalOdds);
             const betId = 'ACC' + Date.now().toString(36).toUpperCase().slice(-4);
 
             const newBet = { id: betId, type: 'accumulator', selections, user: userJid, userId: user.id, userName: user.name, amount, odds: totalOdds, potentialWin, status: 'active', placedAt: Date.now() };
             await betsCol().insertOne(newBet);
-            for (const matchId of matchIds) await matchesCol().updateOne({ id: matchId }, { $push: { bets: betId }, $inc: { pool: amount / selections.length } });
+            for (const sel of selections) await matchesCol().updateOne({ id: sel.matchId }, { $push: { bets: betId }, $inc: { pool: amount / selections.length } });
             return res.json({ success: true, message: 'Multiple placed', bet: newBet, newBalance: user.balance - totalCost });
         } else {
             const createdBets = [];
@@ -176,25 +246,52 @@ app.post('/api/bets/place-multiple', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ======================== ADMIN ACTIONS ========================
-app.post('/api/admin/setpassword', async (req, res) => {
-    try {
-        const { targetJid, newPassword } = req.body;
-        const aviatorDb = db.client.db('aviator');
-        await aviatorDb.collection('players').updateOne({ jid: targetJid }, { $set: { webPassword: newPassword } });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false }); }
-});
-
-app.post('/api/admin/forcelive', async (req, res) => {
+app.post('/api/bets/settle', async (req, res) => {
     try {
         const { matchId } = req.body;
-        await matchesCol().updateOne({ id: matchId }, { $set: { status: 'live', kickoff: Date.now() - 1000 } });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false }); }
+        const match = await matchesCol().findOne({ id: matchId });
+        if (!match || !match.result) return res.status(400).json({ success: false });
+
+        const h = match.result.home;
+        const a = match.result.away;
+        const totalGoals = h + a;
+        const winner = h > a ? 'home' : a > h ? 'away' : 'draw';
+        const bets = await betsCol().find({ matchId, status: 'active' }).toArray();
+        const aviatorDb = db.client.db('aviator');
+
+        for (const bet of bets) {
+            let isWinner = false;
+            const p = bet.pick;
+
+            if (p === 'home' || p === 'draw' || p === 'away') isWinner = p === winner;
+            else if (p === 'btts_yes') isWinner = h > 0 && a > 0;
+            else if (p === 'btts_no') isWinner = !(h > 0 && a > 0);
+            else if (p.startsWith('over_')) isWinner = totalGoals > parseFloat(p.split('_')[1]);
+            else if (p.startsWith('under_')) isWinner = totalGoals < parseFloat(p.split('_')[1]);
+            else if (p.startsWith('handicap_')) {
+                const parts = p.split('_'); const team = parts[1]; const val = parseInt(parts[2]);
+                const adjH = team === 'home' ? h + val : h;
+                const adjA = team === 'away' ? a + val : a;
+                isWinner = adjH > adjA ? (team === 'home') : (adjA > adjH ? (team === 'away') : false);
+            }
+            else if (p === 'ht_home') isWinner = h > a;
+            else if (p === 'ht_draw') isWinner = h === a;
+            else if (p === 'ht_away') isWinner = a > h;
+            else if (p.startsWith('first10_')) isWinner = p.replace('first10_', '') === winner;
+            else if (p.startsWith('score_')) isWinner = p.replace('score_', '') === `${h}-${a}`;
+
+            if (isWinner) {
+                await betsCol().updateOne({ id: bet.id }, { $set: { status: 'won' } });
+                if (bet.user && bet.potentialWin) await aviatorDb.collection('players').updateOne({ jid: bet.user }, { $inc: { balance: bet.potentialWin } });
+            } else {
+                await betsCol().updateOne({ id: bet.id }, { $set: { status: 'lost' } });
+            }
+        }
+        await matchesCol().updateOne({ id: matchId }, { $set: { settled: true } });
+        res.json({ success: true, settled: bets.length });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// OTHER ROUTES (Matches, Standings, Sync)
 app.get('/matches', async (req, res) => { const matches = await matchesCol().find({}).toArray(); const result = {}; matches.forEach(m => { result[m.id] = m; delete result[m.id]._id; }); res.json({ success: true, matches: result }); });
 app.get('/bets', async (req, res) => { const bets = await betsCol().find({}).toArray(); const result = {}; bets.forEach(b => { result[b.id] = b; delete result[b.id]._id; }); res.json({ success: true, bets: result }); });
 app.get('/standings', async (req, res) => { const s = await standingsCol().find({}).toArray(); const result = {}; s.forEach(x => { result[x.league] = x.data; delete result[x.league]._id; }); res.json({ success: true, standings: result }); });
