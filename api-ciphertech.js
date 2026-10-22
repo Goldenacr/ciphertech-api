@@ -11,7 +11,8 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 
 const PORT = process.env.PORT || 3002;
 app.use(cors());
-// Increase payload limit for large season syncs
+
+// Allow up to 50MB payloads to handle large season syncs
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -78,6 +79,7 @@ function startMatchSimulation(matchId, fixedResult = null) {
 
     const interval = setInterval(async () => {
         matchState.minute += 1; 
+
         const r = Math.random();
         let event = null; let comment = null;
         let newBallPos = { top: `${Math.floor(Math.random() * 40) + 30}%`, left: `${Math.floor(Math.random() * 40) + 30}%` };
@@ -218,7 +220,6 @@ app.post('/matches/sync', async (req, res) => {
         // --- TIME SYNC LOGIC ---
         if (serverTime) {
             BOT_TIME_OFFSET = serverTime - Date.now();
-            // Persist to DB so it survives API restarts
             await db.collection('config').updateOne(
                 { key: 'timeOffset' }, 
                 { $set: { value: BOT_TIME_OFFSET } }, 
@@ -230,9 +231,18 @@ app.post('/matches/sync', async (req, res) => {
         if (!col) return res.json({ success: true });
 
         for (const [id, match] of Object.entries(matches || {})) {
+            // --- SANITIZATION LOGIC ---
+            if (match.kickoff) {
+                const parsedDate = new Date(match.kickoff);
+                if (!isNaN(parsedDate.getTime())) {
+                    match.kickoff = Math.floor(parsedDate.getTime()); 
+                }
+            }
+
             match.botId = botId;
             match.syncedAt = Date.now();
             await col.updateOne({ id }, { $set: match }, { upsert: true });
+            
             if (match.status === 'live' && !activeMatches.has(id)) startMatchSimulation(id, match.fixed ? match.result : null);
         }
         
@@ -382,12 +392,11 @@ setInterval(async () => {
     } catch (e) {}
 }, 3600000);
 
-// The website uses this to know the bot's "true" time
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         db: !!db, 
-        timestamp: Date.now() + BOT_TIME_OFFSET // Bot's true time
+        timestamp: Date.now() + BOT_TIME_OFFSET
     });
 });
 
